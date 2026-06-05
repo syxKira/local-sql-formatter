@@ -328,8 +328,8 @@ function formatSql(sql) {
       continue;
     }
 
-    if (["and", "or"].includes(lower) && ["where", "having"].includes(clauseMode)) {
-      newLineAt(baseCol() + 4);
+    if (["and", "or"].includes(lower) && ["where", "having", "on"].includes(clauseMode)) {
+      newLineAt(clauseMode === "on" ? baseCol() + 22 : baseCol() + 4);
       appendToken(token, previousToken);
       previousToken = token;
       continue;
