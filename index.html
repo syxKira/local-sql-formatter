@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>SQL 格式化与字段解析</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <header class="topbar">
+        <div>
+          <h1>SQL 格式化与字段解析</h1>
+          <p>本地处理 MySQL SQL，格式化、高亮并提取表与字段引用。</p>
+        </div>
+        <div class="top-actions">
+          <button id="loadSampleBtn" class="ghost-btn" type="button" title="载入示例 SQL">示例</button>
+          <button id="clearBtn" class="ghost-btn" type="button" title="清空输入">清空</button>
+        </div>
+      </header>
+
+      <section class="workspace" aria-label="SQL 工具工作区">
+        <div class="editor-pane">
+          <div class="pane-head">
+            <span>SQL</span>
+            <div class="segmented" role="group" aria-label="编辑器操作">
+              <button id="pasteBtn" class="ghost-btn" type="button" title="从剪贴板粘贴">粘贴</button>
+              <button id="formatBtn" class="primary-btn" type="button">格式化</button>
+              <button id="copyBtn" class="ghost-btn" type="button" title="复制 SQL">复制</button>
+            </div>
+          </div>
+          <div id="sqlInput" class="sql-editor" aria-label="SQL 编辑器"></div>
+        </div>
+      </section>
+
+      <section class="analysis-grid" aria-label="SQL 表字段分析">
+        <div class="summary-strip">
+          <div>
+            <span id="tableCount">0</span>
+            <label>表</label>
+          </div>
+          <div>
+            <span id="fieldCount">0</span>
+            <label>字段</label>
+          </div>
+          <div>
+            <span id="aliasCount">0</span>
+            <label>别名</label>
+          </div>
+        </div>
+        <div id="analysisPanel" class="analysis-panel">
+          <div class="empty-state">粘贴 SQL 后会在这里展示表、别名和字段引用。</div>
+        </div>
+      </section>
+    </main>
+
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>

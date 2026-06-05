@@ -1,0 +1,24 @@
+{
+  "name": "local-sql-formatter",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10.33.0",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1 --port 8765",
+    "build": "vite build",
+    "preview": "vite preview --host 127.0.0.1 --port 8765",
+    "share": "vite preview --host 0.0.0.0 --port 8765"
+  },
+  "dependencies": {
+    "@codemirror/commands": "^6.10.0",
+    "@codemirror/lang-sql": "^6.10.0",
+    "@codemirror/language": "^6.11.3",
+    "@codemirror/search": "^6.5.11",
+    "@codemirror/state": "^6.5.2",
+    "@codemirror/view": "^6.38.3",
+    "@lezer/highlight": "^1.2.1",
+    "vite": "^6.0.0"
+  },
+  "devDependencies": {}
+}
