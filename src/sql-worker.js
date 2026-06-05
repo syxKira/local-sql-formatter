@@ -10,7 +10,7 @@ const KEYWORDS = new Set([
 
 const FUNCTIONS = new Set([
   "avg", "cast", "coalesce", "concat", "count", "date", "date_add", "date_format",
-  "from_unixtime", "ifnull", "lower", "max", "min", "round", "sum", "substring",
+  "from_unixtime", "if", "ifnull", "lower", "max", "min", "round", "sum", "substring",
   "trim", "upper"
 ]);
 
@@ -19,6 +19,11 @@ const RESERVED_ALIAS_STOP = new Set([
   "group", "order", "having", "limit", "union", "set", "values", "using", "and",
   "or", "when", "then", "else", "end"
 ]);
+
+const MAX_ALIAS_ALIGNMENT_COLUMN = 96;
+const MAX_ALIAS_ALIGNMENT_PADDING = 40;
+const MAX_INLINE_CASE_LENGTH = 100;
+const MAX_LINE_LENGTH = 120;
 
 self.addEventListener("message", (event) => {
   const { id, type, sql } = event.data;
@@ -145,6 +150,27 @@ function nextMeaningful(tokens, index) {
   return tokens[i];
 }
 
+function previousMeaningful(tokens, index) {
+  let i = index - 1;
+  while (tokens[i] && tokens[i].type === "comment") i -= 1;
+  return { token: tokens[i], index: i };
+}
+
+function isDistinctFromOperator(tokens, index) {
+  if (lowerValue(tokens[index]) !== "from") return false;
+
+  const previous = previousMeaningful(tokens, index);
+  if (lowerValue(previous.token ?? { value: "" }) !== "distinct") return false;
+
+  const beforeDistinct = previousMeaningful(tokens, previous.index);
+  const beforeDistinctLower = lowerValue(beforeDistinct.token ?? { value: "" });
+  if (beforeDistinctLower === "is") return true;
+  if (beforeDistinctLower !== "not") return false;
+
+  const beforeNot = previousMeaningful(tokens, beforeDistinct.index);
+  return lowerValue(beforeNot.token ?? { value: "" }) === "is";
+}
+
 function stripWrappingSqlQuotes(sql) {
   const trimmed = sql.trim();
   if (trimmed.length < 2) return trimmed;
@@ -185,11 +211,44 @@ function formatSql(sql) {
     line = " ".repeat(Math.max(col, 0));
   };
   const hasContent = () => line.replace(/^ +/, "") !== "";
+  const lineIndent = () => line.match(/^ */)[0].length;
   const baseCol = () => {
     const top = parens[parens.length - 1];
     return top ? top.col + 1 : 0;
   };
+  const currentSelectAnchor = () => {
+    const top = selectAnchors[selectAnchors.length - 1];
+    return top && top.depth === parens.length ? top.anchor : null;
+  };
+  const commentIndent = () => {
+    const selectAnchor = currentSelectAnchor();
+    if (selectAnchor !== null) return selectAnchor;
+    if (hasContent()) return Math.max(baseCol(), lineIndent());
+    return baseCol();
+  };
+  const maybeWrapBefore = (token, prev) => {
+    if (!hasContent()) return;
+    if ([",", ".", ")", ";"].includes(token.value)) return;
+
+    const value = displayToken(token);
+    const extraSpace = ["(", "."].includes(prev?.value ?? "") ? 0 : 1;
+    if (line.length + value.length + extraSpace <= MAX_LINE_LENGTH) return;
+
+    const selectAnchor = currentSelectAnchor();
+    if (selectAnchor !== null) {
+      newLineAt(selectAnchor + 4);
+      return;
+    }
+
+    const clauseMode = clauseStack[clauseStack.length - 1];
+    if (["where", "having", "on"].includes(clauseMode)) {
+      newLineAt(clauseMode === "on" ? baseCol() + 26 : baseCol() + 8);
+    }
+  };
   const appendToken = (token, prev) => {
+    const isCompoundOperatorContinuation = lowerValue(token) === "from" &&
+      lowerValue(prev ?? { value: "" }) === "distinct";
+    if (!isCompoundOperatorContinuation) maybeWrapBefore(token, prev);
     const value = displayToken(token);
     const prevValue = prev?.value ?? "";
     const prevLower = prev ? prev.value.toLowerCase() : "";
@@ -223,9 +282,11 @@ function formatSql(sql) {
     const clauseMode = clauseStack[clauseStack.length - 1];
 
     if (token.type === "comment") {
+      const indent = commentIndent();
       if (hasContent()) flushLine();
-      line = token.value;
+      line = " ".repeat(indent) + token.value;
       flushLine();
+      line = " ".repeat(indent);
       previousToken = token;
       continue;
     }
@@ -261,7 +322,7 @@ function formatSql(sql) {
       continue;
     }
 
-    if (lower === "from" && clauseMode !== "from") {
+    if (lower === "from" && clauseMode !== "from" && !isDistinctFromOperator(tokens, i)) {
       if (clauseMode === "select") {
         clauseStack.pop();
         popSelectAnchorAtCurrentDepth();
@@ -328,11 +389,20 @@ function formatSql(sql) {
       continue;
     }
 
-    if (["and", "or"].includes(lower) && ["where", "having", "on"].includes(clauseMode)) {
-      newLineAt(clauseMode === "on" ? baseCol() + 22 : baseCol() + 4);
-      appendToken(token, previousToken);
-      previousToken = token;
-      continue;
+    if (["and", "or"].includes(lower)) {
+      const c = caseStack[caseStack.length - 1];
+      if (["where", "having", "on"].includes(clauseMode)) {
+        newLineAt(clauseMode === "on" ? baseCol() + 22 : baseCol() + 4);
+        appendToken(token, previousToken);
+        previousToken = token;
+        continue;
+      }
+      if (c && c.multiline) {
+        newLineAt(c.anchor + 8);
+        appendToken(token, previousToken);
+        previousToken = token;
+        continue;
+      }
     }
 
     if (lower === "case") {
@@ -351,6 +421,14 @@ function formatSql(sql) {
     if (lower === "when") {
       const c = caseStack[caseStack.length - 1];
       if (c && c.multiline) newLineAt(c.anchor + 4);
+      appendToken(token, previousToken);
+      previousToken = token;
+      continue;
+    }
+
+    if (lower === "then") {
+      const c = caseStack[caseStack.length - 1];
+      if (c && c.multiline && line.length > MAX_INLINE_CASE_LENGTH) newLineAt(c.anchor + 8);
       appendToken(token, previousToken);
       previousToken = token;
       continue;
@@ -426,16 +504,23 @@ function alignAliasRun(lines, start, end) {
   const candidates = [];
   for (let i = start; i < end; i += 1) {
     const index = findAliasIndex(lines[i]);
-    if (index >= 0) candidates.push({ index: i, aliasIndex: index });
+    if (index >= 0 && index <= MAX_ALIAS_ALIGNMENT_COLUMN) {
+      candidates.push({ index: i, aliasIndex: index });
+    }
   }
   if (candidates.length < 2) return;
 
   const maxAliasIndex = Math.max(...candidates.map((item) => item.aliasIndex));
+  if (maxAliasIndex > MAX_ALIAS_ALIGNMENT_COLUMN) return;
+
   for (const item of candidates) {
     const line = lines[item.index];
     const before = line.slice(0, item.aliasIndex).replace(/\s+$/, "");
+    const padding = maxAliasIndex - before.length + 1;
+    if (padding > MAX_ALIAS_ALIGNMENT_PADDING) continue;
+
     const after = line.slice(item.aliasIndex).trimStart().replace(/^as\s+/i, "as ");
-    lines[item.index] = before + " ".repeat(maxAliasIndex - before.length + 1) + after;
+    lines[item.index] = before + " ".repeat(padding) + after;
   }
 }
 
