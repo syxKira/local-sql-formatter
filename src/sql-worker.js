@@ -28,13 +28,13 @@ const MAX_LINE_LENGTH = 120;
 self.addEventListener("message", (event) => {
   const { id, type, sql } = event.data;
   try {
-    const unwrapped = stripWrappingSqlQuotes(sql);
+    const normalized = normalizePastedSql(sql);
     if (type === "format") {
-      const formatted = formatSql(unwrapped);
+      const formatted = formatSql(normalized);
       self.postMessage({ id, type, formatted, analysis: analyzeSql(formatted) });
       return;
     }
-    self.postMessage({ id, type, analysis: analyzeSql(unwrapped) });
+    self.postMessage({ id, type, analysis: analyzeSql(normalized) });
   } catch (error) {
     self.postMessage({ id, type, error: error instanceof Error ? error.message : String(error) });
   }
@@ -171,9 +171,13 @@ function isDistinctFromOperator(tokens, index) {
   return lowerValue(beforeNot.token ?? { value: "" }) === "is";
 }
 
+function looksLikeSql(value) {
+  return /\b(select|set|with|insert|update|delete|from)\b/i.test(value);
+}
+
 function stripWrappingSqlQuotes(sql) {
   const trimmed = sql.trim();
-  if (trimmed.length < 2) return trimmed;
+  if (trimmed.length < 2) return { text: trimmed, stripped: false };
 
   const quotePairs = new Map([
     ['"', '"'],
@@ -183,11 +187,81 @@ function stripWrappingSqlQuotes(sql) {
   ]);
   const first = trimmed[0];
   const last = trimmed[trimmed.length - 1];
-  if (quotePairs.get(first) !== last) return trimmed;
+  if (quotePairs.get(first) !== last) return { text: trimmed, stripped: false };
 
   const inner = trimmed.slice(1, -1).trim();
-  const looksLikeSql = /\b(select|set|with|insert|update|delete|from)\b/i.test(inner);
-  return looksLikeSql ? inner : trimmed;
+  return looksLikeSql(inner) ? { text: inner, stripped: true } : { text: trimmed, stripped: false };
+}
+
+function parseJsonSqlString(sql) {
+  const trimmed = sql.trim();
+  if (trimmed[0] !== '"' || trimmed[trimmed.length - 1] !== '"') return null;
+
+  try {
+    const parsed = JSON.parse(trimmed);
+    if (typeof parsed === "string" && looksLikeSql(parsed)) return parsed.trim();
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+function countMatches(value, pattern) {
+  return value.match(pattern)?.length ?? 0;
+}
+
+function shouldDecodeEscapedSql(value, strippedWrappingQuotes) {
+  if (!looksLikeSql(value)) return false;
+
+  const escapedQuotes = countMatches(value, /\\["'`]/g);
+  const escapedNewlines = countMatches(value, /\\[rnt]/g);
+  const escapedIdentifiers = countMatches(value, /\\["`][#A-Za-z_][^"`\\]{0,120}\\["`]/g);
+
+  if (strippedWrappingQuotes && (escapedQuotes > 0 || escapedNewlines > 0)) return true;
+  return escapedIdentifiers >= 2 || escapedQuotes >= 4 || escapedNewlines >= 2;
+}
+
+function decodeStringEscapes(value) {
+  let decoded = "";
+
+  for (let i = 0; i < value.length; i += 1) {
+    const ch = value[i];
+    const next = value[i + 1];
+    if (ch !== "\\" || next === undefined) {
+      decoded += ch;
+      continue;
+    }
+
+    if (next === "n") decoded += "\n";
+    else if (next === "r") decoded += "\r";
+    else if (next === "t") decoded += "\t";
+    else if (next === "b") decoded += "\b";
+    else if (next === "f") decoded += "\f";
+    else if (next === '"' || next === "'" || next === "`" || next === "\\") decoded += next;
+    else {
+      decoded += ch + next;
+    }
+    i += 1;
+  }
+
+  return decoded;
+}
+
+function normalizePastedSql(sql) {
+  const parsedJson = parseJsonSqlString(sql);
+  if (parsedJson !== null) return parsedJson;
+
+  const stripped = stripWrappingSqlQuotes(sql);
+  let normalized = stripped.text;
+
+  for (let pass = 0; pass < 2; pass += 1) {
+    if (!shouldDecodeEscapedSql(normalized, stripped.stripped || pass > 0)) break;
+    const decoded = decodeStringEscapes(normalized);
+    if (decoded === normalized) break;
+    normalized = decoded.trim();
+  }
+
+  return normalized;
 }
 
 function formatSql(sql) {
