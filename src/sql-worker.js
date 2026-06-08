@@ -22,6 +22,7 @@ const RESERVED_ALIAS_STOP = new Set([
 
 const MAX_ALIAS_ALIGNMENT_COLUMN = 96;
 const MAX_ALIAS_ALIGNMENT_PADDING = 40;
+const MAX_BOOLEAN_INLINE_LENGTH = 96;
 const MAX_INLINE_CASE_LENGTH = 100;
 const MAX_LINE_LENGTH = 120;
 
@@ -275,6 +276,7 @@ function formatSql(sql) {
   const caseStack = [];
   const clauseStack = ["root"];
   let previousToken = null;
+  let conditionBreakCol = null;
 
   const flushLine = () => {
     out.push(line.replace(/\s+$/, ""));
@@ -299,6 +301,14 @@ function formatSql(sql) {
     if (selectAnchor !== null) return selectAnchor;
     if (hasContent()) return Math.max(baseCol(), lineIndent());
     return baseCol();
+  };
+  const fallbackBooleanCol = () => {
+    const selectAnchor = currentSelectAnchor();
+    if (selectAnchor !== null) return selectAnchor + 4;
+
+    const preferred = baseCol() + 4;
+    const indent = lineIndent();
+    return indent > 0 ? Math.min(indent, preferred) : preferred;
   };
   const maybeWrapBefore = (token, prev) => {
     if (!hasContent()) return;
@@ -401,6 +411,7 @@ function formatSql(sql) {
         clauseStack.pop();
         popSelectAnchorAtCurrentDepth();
       }
+      if (parens.length === 0) conditionBreakCol = null;
       newLineAt(baseCol());
       appendToken(token, previousToken);
       clauseStack.push("from");
@@ -412,6 +423,7 @@ function formatSql(sql) {
       popClausesWhile(["select", "from", "join", "on"]);
       newLineAt(baseCol());
       appendToken(token, previousToken);
+      conditionBreakCol = baseCol() + 4;
       clauseStack.push(lower);
       previousToken = token;
       continue;
@@ -419,6 +431,7 @@ function formatSql(sql) {
 
     if ((lower === "group" || lower === "order") && nextLower === "by") {
       popClausesWhile(["select", "from", "join", "on", "where", "having"]);
+      if (parens.length === 0) conditionBreakCol = null;
       newLineAt(baseCol());
       appendToken(token, previousToken);
       i += 1;
@@ -430,6 +443,7 @@ function formatSql(sql) {
 
     if (["limit", "offset", "union"].includes(lower)) {
       popClausesWhile(["select", "from", "join", "on", "where", "having", "group", "order"]);
+      if (parens.length === 0) conditionBreakCol = null;
       newLineAt(baseCol());
       appendToken(token, previousToken);
       clauseStack.push(lower);
@@ -458,6 +472,7 @@ function formatSql(sql) {
     if (lower === "on" && clauseMode === "join") {
       newLineAt(baseCol() + 19);
       appendToken(token, previousToken);
+      conditionBreakCol = baseCol() + 22;
       clauseStack.push("on");
       previousToken = token;
       continue;
@@ -466,13 +481,26 @@ function formatSql(sql) {
     if (["and", "or"].includes(lower)) {
       const c = caseStack[caseStack.length - 1];
       if (["where", "having", "on"].includes(clauseMode)) {
-        newLineAt(clauseMode === "on" ? baseCol() + 22 : baseCol() + 4);
+        conditionBreakCol = clauseMode === "on" ? baseCol() + 22 : baseCol() + 4;
+        newLineAt(conditionBreakCol);
         appendToken(token, previousToken);
         previousToken = token;
         continue;
       }
       if (c && c.multiline) {
         newLineAt(c.anchor + 8);
+        appendToken(token, previousToken);
+        previousToken = token;
+        continue;
+      }
+      if (conditionBreakCol !== null) {
+        newLineAt(conditionBreakCol);
+        appendToken(token, previousToken);
+        previousToken = token;
+        continue;
+      }
+      if (line.length >= MAX_BOOLEAN_INLINE_LENGTH) {
+        newLineAt(conditionBreakCol ?? fallbackBooleanCol());
         appendToken(token, previousToken);
         previousToken = token;
         continue;
@@ -542,6 +570,7 @@ function formatSql(sql) {
       selectAnchors.length = 0;
       caseStack.length = 0;
       parens.length = 0;
+      conditionBreakCol = null;
       previousToken = token;
       continue;
     }
