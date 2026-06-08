@@ -313,6 +313,7 @@ function formatSql(sql) {
   const maybeWrapBefore = (token, prev) => {
     if (!hasContent()) return;
     if ([",", ".", ")", ";"].includes(token.value)) return;
+    if (lowerValue(prev ?? { value: "" }) === "as") return;
 
     const value = displayToken(token);
     const extraSpace = ["(", "."].includes(prev?.value ?? "") ? 0 : 1;
