@@ -14,6 +14,8 @@ const FUNCTIONS = new Set([
   "trim", "upper"
 ]);
 
+const LONG_EXPRESSION_OPERATORS = new Set(["*", "/", "+"]);
+
 const RESERVED_ALIAS_STOP = new Set([
   "on", "where", "join", "left", "right", "inner", "outer", "full", "cross",
   "group", "order", "having", "limit", "union", "set", "values", "using", "and",
@@ -24,6 +26,8 @@ const MAX_ALIAS_ALIGNMENT_COLUMN = 96;
 const MAX_ALIAS_ALIGNMENT_PADDING = 40;
 const MAX_BOOLEAN_INLINE_LENGTH = 96;
 const MAX_INLINE_CASE_LENGTH = 100;
+const MAX_CASE_PREFIX_LENGTH = 40;
+const MAX_INLINE_LIST_LENGTH = 76;
 const MAX_LINE_LENGTH = 120;
 
 self.addEventListener("message", (event) => {
@@ -310,6 +314,30 @@ function formatSql(sql) {
     const indent = lineIndent();
     return indent > 0 ? Math.min(indent, preferred) : preferred;
   };
+  const currentParen = () => parens[parens.length - 1] ?? null;
+  const listBreakCol = (paren) => {
+    if (paren.listBreakCol !== null && paren.listBreakCol !== undefined) return paren.listBreakCol;
+
+    const indent = lineIndent();
+    const byParen = paren.col + 1;
+    const byIndent = indent + 4;
+    const col = byParen > MAX_LINE_LENGTH - 32 ? byIndent : Math.max(byParen, byIndent);
+    paren.listBreakCol = col;
+    return col;
+  };
+  const wrapCurrentList = (paren) => {
+    paren.multilineList = true;
+    newLineAt(listBreakCol(paren));
+  };
+  const expressionBreakCol = () => {
+    const preferred = baseCol() + 4;
+    const byIndent = lineIndent() + 4;
+    return preferred > MAX_LINE_LENGTH - 32 ? byIndent : Math.max(preferred, byIndent);
+  };
+  const expandCase = (c, offset) => {
+    c.multiline = true;
+    newLineAt(c.anchor + offset);
+  };
   const maybeWrapBefore = (token, prev) => {
     if (!hasContent()) return;
     if ([",", ".", ")", ";"].includes(token.value)) return;
@@ -317,8 +345,17 @@ function formatSql(sql) {
 
     const value = displayToken(token);
     const extraSpace = ["(", "."].includes(prev?.value ?? "") ? 0 : 1;
+    if (LONG_EXPRESSION_OPERATORS.has(token.value) && line.length >= MAX_INLINE_LIST_LENGTH) {
+      newLineAt(expressionBreakCol());
+      return;
+    }
     if (line.length + value.length + extraSpace <= MAX_LINE_LENGTH) return;
 
+    const paren = currentParen();
+    if (paren && !paren.isFunction) {
+      wrapCurrentList(paren);
+      return;
+    }
     const selectAnchor = currentSelectAnchor();
     if (selectAnchor !== null) {
       newLineAt(selectAnchor + 4);
@@ -381,7 +418,7 @@ function formatSql(sql) {
       const prevLower = previousToken ? previousToken.value.toLowerCase() : "";
       const isFunction = previousToken?.type === "word" &&
         !["from", "join", "in", "values", "exists", "into"].includes(prevLower);
-      parens.push({ col: line.length - 1, isFunction });
+      parens.push({ col: line.length - 1, isFunction, listBreakCol: null, multilineList: false });
       previousToken = token;
       continue;
     }
@@ -523,7 +560,7 @@ function formatSql(sql) {
 
     if (lower === "when") {
       const c = caseStack[caseStack.length - 1];
-      if (c && c.multiline) newLineAt(c.anchor + 4);
+      if (c && (c.multiline || line.length >= MAX_CASE_PREFIX_LENGTH)) expandCase(c, 4);
       appendToken(token, previousToken);
       previousToken = token;
       continue;
@@ -531,7 +568,11 @@ function formatSql(sql) {
 
     if (lower === "then") {
       const c = caseStack[caseStack.length - 1];
-      if (c && c.multiline && line.length > MAX_INLINE_CASE_LENGTH) newLineAt(c.anchor + 8);
+      if (c && c.multiline && line.length >= MAX_INLINE_LIST_LENGTH) {
+        expandCase(c, 8);
+      } else if (c && line.length > MAX_INLINE_CASE_LENGTH) {
+        expandCase(c, 8);
+      }
       appendToken(token, previousToken);
       previousToken = token;
       continue;
@@ -539,7 +580,7 @@ function formatSql(sql) {
 
     if (lower === "else") {
       const c = caseStack[caseStack.length - 1];
-      if (c && c.multiline) newLineAt(c.anchor + 4);
+      if (c && c.multiline) expandCase(c, 4);
       appendToken(token, previousToken);
       previousToken = token;
       continue;
@@ -555,10 +596,13 @@ function formatSql(sql) {
     if (token.value === ",") {
       appendToken(token, previousToken);
       const top = selectAnchors[selectAnchors.length - 1];
+      const paren = currentParen();
       if (top && top.depth === parens.length) {
         newLineAt(top.anchor);
       } else if ((clauseMode === "group" || clauseMode === "order") && parens.length === 0) {
         newLineAt(baseCol() + 4);
+      } else if (paren && !paren.isFunction && (paren.multilineList || line.length >= MAX_INLINE_LIST_LENGTH)) {
+        wrapCurrentList(paren);
       }
       previousToken = token;
       continue;
