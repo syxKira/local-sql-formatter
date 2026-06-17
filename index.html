@@ -23,10 +23,29 @@
         <div class="editor-pane">
           <div class="pane-head">
             <span>SQL</span>
-            <div class="segmented" role="group" aria-label="编辑器操作">
-              <button id="pasteBtn" class="ghost-btn" type="button" title="从剪贴板粘贴">粘贴</button>
-              <button id="formatBtn" class="primary-btn" type="button">格式化</button>
-              <button id="copyBtn" class="ghost-btn" type="button" title="复制 SQL">复制</button>
+            <div class="editor-tools">
+              <form id="searchBar" class="search-bar" role="search" aria-label="搜索 SQL" hidden>
+                <span class="search-glyph" aria-hidden="true">⌕</span>
+                <input
+                  id="searchInput"
+                  type="search"
+                  placeholder="搜索"
+                  autocomplete="off"
+                  spellcheck="false"
+                  aria-label="搜索 SQL 内容"
+                />
+                <span id="searchCount" class="search-count" aria-live="polite">0/0</span>
+                <button id="searchPrevBtn" class="icon-btn" type="button" title="上一处" aria-label="上一处">↑</button>
+                <button id="searchNextBtn" class="icon-btn" type="button" title="下一处" aria-label="下一处">↓</button>
+                <button id="searchCaseBtn" class="search-toggle" type="button" title="区分大小写" aria-label="区分大小写" aria-pressed="false">Cc</button>
+                <button id="searchWordBtn" class="search-toggle" type="button" title="整词匹配" aria-label="整词匹配" aria-pressed="false">W</button>
+                <button id="searchRegexBtn" class="search-toggle" type="button" title="正则表达式" aria-label="正则表达式" aria-pressed="false">.*</button>
+              </form>
+              <div class="segmented" role="group" aria-label="编辑器操作">
+                <button id="pasteBtn" class="ghost-btn" type="button" title="从剪贴板粘贴">粘贴</button>
+                <button id="formatBtn" class="primary-btn" type="button">格式化</button>
+                <button id="copyBtn" class="ghost-btn" type="button" title="复制 SQL">复制</button>
+              </div>
             </div>
           </div>
           <div id="sqlInput" class="sql-editor" aria-label="SQL 编辑器"></div>
