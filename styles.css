@@ -71,7 +71,7 @@ button:active {
 }
 
 .app-shell {
-  width: min(1500px, calc(100vw - 32px));
+  width: min(2200px, calc(100vw - 48px));
   margin: 0 auto;
   padding: 22px 0 28px;
 }
@@ -156,6 +156,10 @@ button:active {
   border: 1px solid #434852;
   border-radius: 7px;
   background: #1c1d22;
+}
+
+.search-bar[hidden] {
+  display: none;
 }
 
 .search-glyph {
@@ -563,7 +567,7 @@ pre {
 
 @media (max-width: 640px) {
   .app-shell {
-    width: min(100vw - 18px, 1500px);
+    width: calc(100vw - 18px);
     padding-top: 12px;
   }
 
