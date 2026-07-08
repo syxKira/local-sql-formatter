@@ -526,7 +526,7 @@ function formatSql(sql) {
         continue;
       }
       if (c && c.multiline) {
-        newLineAt(c.anchor + 8);
+        if (line.length >= MAX_BOOLEAN_INLINE_LENGTH) newLineAt(c.anchor + 8);
         appendToken(token, previousToken);
         previousToken = token;
         continue;
@@ -568,7 +568,7 @@ function formatSql(sql) {
 
     if (lower === "then") {
       const c = caseStack[caseStack.length - 1];
-      if (c && c.multiline && line.length >= MAX_INLINE_LIST_LENGTH) {
+      if (c && c.multiline && line.length >= MAX_INLINE_CASE_LENGTH) {
         expandCase(c, 8);
       } else if (c && line.length > MAX_INLINE_CASE_LENGTH) {
         expandCase(c, 8);
