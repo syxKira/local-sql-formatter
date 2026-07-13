@@ -32,6 +32,8 @@ let nextRequestId = 0;
 let latestFormatId = 0;
 let latestAnalysisId = 0;
 let latestAnalysisTimer = 0;
+let latestPasteFormatTimer = 0;
+let cachedDisplayMetrics = null;
 let searchMatches = [];
 let searchTruncated = false;
 
@@ -98,7 +100,12 @@ const editor = new EditorView({
         ...historyKeymap
       ]),
       EditorView.updateListener.of((update) => {
-        if (update.docChanged) scheduleAnalysis();
+        if (update.docChanged) {
+          scheduleAnalysis();
+          if (update.transactions.some((transaction) => transaction.isUserEvent("input.paste"))) {
+            scheduleFormatAfterPaste();
+          }
+        }
         if (update.docChanged || update.selectionSet) updateSearchStats();
       })
     ]
@@ -138,11 +145,27 @@ function replaceEditorText(text) {
   updateSearchStats();
 }
 
+function getEditorDisplayMetrics() {
+  if (cachedDisplayMetrics) return cachedDisplayMetrics;
+
+  const style = window.getComputedStyle(editor.contentDOM);
+  const canvas = document.createElement("canvas");
+  const context = canvas.getContext("2d");
+  if (!context) return { wideCharacterWidth: 2 };
+
+  context.font = `${style.fontStyle} ${style.fontWeight} ${style.fontSize} ${style.fontFamily}`;
+  const spaceWidth = context.measureText(" ").width;
+  const wideCharacterWidth = context.measureText("自然").width / 2;
+  const ratio = spaceWidth > 0 ? wideCharacterWidth / spaceWidth : 2;
+  cachedDisplayMetrics = { wideCharacterWidth: Math.min(Math.max(ratio, 1), 2) };
+  return cachedDisplayMetrics;
+}
+
 function sendWorker(type, sqlText) {
   const id = ++nextRequestId;
   if (type === "format") latestFormatId = id;
   else latestAnalysisId = id;
-  worker.postMessage({ id, type, sql: sqlText });
+  worker.postMessage({ id, type, sql: sqlText, displayMetrics: getEditorDisplayMetrics() });
 }
 
 function scheduleAnalysis() {
@@ -164,6 +187,14 @@ function formatCurrentSql() {
   formatBtn.disabled = true;
   formatBtn.textContent = "格式化中";
   sendWorker("format", text);
+}
+
+function scheduleFormatAfterPaste() {
+  window.clearTimeout(latestPasteFormatTimer);
+  latestPasteFormatTimer = window.setTimeout(() => {
+    latestPasteFormatTimer = 0;
+    formatCurrentSql();
+  }, 0);
 }
 
 function focusSearchInput() {

@@ -22,17 +22,24 @@ const RESERVED_ALIAS_STOP = new Set([
   "or", "when", "then", "else", "end"
 ]);
 
-const MAX_ALIAS_ALIGNMENT_COLUMN = 96;
-const MAX_ALIAS_ALIGNMENT_PADDING = 40;
+const MAX_ALIAS_ALIGNMENT_COLUMN = 106;
 const MAX_BOOLEAN_INLINE_LENGTH = 96;
+const MAX_CASE_BOOLEAN_INLINE_LENGTH = 80;
+const MAX_CASE_COMPOUND_THEN_PREFIX = 60;
 const MAX_INLINE_CASE_LENGTH = 100;
 const MAX_CASE_PREFIX_LENGTH = 40;
 const MAX_INLINE_LIST_LENGTH = 76;
-const MAX_LINE_LENGTH = 120;
+const MAX_LINE_LENGTH = 142;
+const MAX_JOIN_INDENT = MAX_LINE_LENGTH - 73;
+let activeWideCharacterWidth = 2;
 
 self.addEventListener("message", (event) => {
-  const { id, type, sql } = event.data;
+  const { id, type, sql, displayMetrics } = event.data;
   try {
+    const measuredWideCharacterWidth = Number(displayMetrics?.wideCharacterWidth);
+    if (Number.isFinite(measuredWideCharacterWidth)) {
+      activeWideCharacterWidth = Math.min(Math.max(measuredWideCharacterWidth, 1), 2);
+    }
     const normalized = normalizePastedSql(sql);
     if (type === "format") {
       const formatted = formatSql(normalized);
@@ -147,6 +154,49 @@ function displayToken(token) {
   const lower = lowerValue(token);
   if (token.type === "word" && KEYWORDS.has(lower)) return lower;
   return token.value;
+}
+
+function isWideCodePoint(codePoint) {
+  return codePoint >= 0x1100 && (
+    codePoint <= 0x115f ||
+    codePoint === 0x2329 ||
+    codePoint === 0x232a ||
+    (codePoint >= 0x2e80 && codePoint <= 0x3247 && codePoint !== 0x303f) ||
+    (codePoint >= 0x3250 && codePoint <= 0x4dbf) ||
+    (codePoint >= 0x4e00 && codePoint <= 0xa4c6) ||
+    (codePoint >= 0xa960 && codePoint <= 0xa97c) ||
+    (codePoint >= 0xac00 && codePoint <= 0xd7a3) ||
+    (codePoint >= 0xf900 && codePoint <= 0xfaff) ||
+    (codePoint >= 0xfe10 && codePoint <= 0xfe19) ||
+    (codePoint >= 0xfe30 && codePoint <= 0xfe6b) ||
+    (codePoint >= 0xff01 && codePoint <= 0xff60) ||
+    (codePoint >= 0xffe0 && codePoint <= 0xffe6) ||
+    (codePoint >= 0x1b000 && codePoint <= 0x1b001) ||
+    (codePoint >= 0x1f200 && codePoint <= 0x1f251) ||
+    (codePoint >= 0x1f300 && codePoint <= 0x1faff) ||
+    (codePoint >= 0x20000 && codePoint <= 0x3fffd)
+  );
+}
+
+function displayWidth(value) {
+  let width = 0;
+  let wideCharacterCount = 0;
+
+  for (const character of value) {
+    const codePoint = character.codePointAt(0);
+    if (
+      codePoint === 0x200d ||
+      (codePoint >= 0xfe00 && codePoint <= 0xfe0f) ||
+      (codePoint >= 0xe0100 && codePoint <= 0xe01ef) ||
+      /\p{Mark}/u.test(character)
+    ) {
+      continue;
+    }
+    if (isWideCodePoint(codePoint)) wideCharacterCount += 1;
+    else width += 1;
+  }
+
+  return width + Math.round(wideCharacterCount * activeWideCharacterWidth);
 }
 
 function nextMeaningful(tokens, index) {
@@ -279,6 +329,7 @@ function formatSql(sql) {
   const selectAnchors = [];
   const caseStack = [];
   const clauseStack = ["root"];
+  const pendingJoinIndents = [];
   let previousToken = null;
   let conditionBreakCol = null;
 
@@ -334,22 +385,39 @@ function formatSql(sql) {
     const byIndent = lineIndent() + 4;
     return preferred > MAX_LINE_LENGTH - 32 ? byIndent : Math.max(preferred, byIndent);
   };
+  const joinBreakCol = () => Math.min(baseCol() + 9, MAX_JOIN_INDENT);
+  const isQualifiedIdentifierToken = (token) => ["word", "quoted", "string"].includes(token?.type);
+  const qualifiedIdentifierLength = (index) => {
+    let length = displayWidth(displayToken(tokens[index]));
+    let cursor = index;
+
+    while (tokens[cursor + 1]?.value === "." && isQualifiedIdentifierToken(tokens[cursor + 2])) {
+      length += 1 + displayWidth(displayToken(tokens[cursor + 2]));
+      cursor += 2;
+    }
+
+    return length;
+  };
   const expandCase = (c, offset) => {
     c.multiline = true;
     newLineAt(c.anchor + offset);
   };
-  const maybeWrapBefore = (token, prev) => {
+  const maybeWrapBefore = (token, prev, index = -1) => {
     if (!hasContent()) return;
     if ([",", ".", ")", ";"].includes(token.value)) return;
+    if (prev?.value === ".") return;
     if (lowerValue(prev ?? { value: "" }) === "as") return;
 
     const value = displayToken(token);
     const extraSpace = ["(", "."].includes(prev?.value ?? "") ? 0 : 1;
-    if (LONG_EXPRESSION_OPERATORS.has(token.value) && line.length >= MAX_INLINE_LIST_LENGTH) {
+    const valueLength = index >= 0 && tokens[index + 1]?.value === "."
+      ? qualifiedIdentifierLength(index)
+      : displayWidth(value);
+    if (LONG_EXPRESSION_OPERATORS.has(token.value) && displayWidth(line) >= MAX_INLINE_LIST_LENGTH) {
       newLineAt(expressionBreakCol());
       return;
     }
-    if (line.length + value.length + extraSpace <= MAX_LINE_LENGTH) return;
+    if (displayWidth(line) + valueLength + extraSpace <= MAX_LINE_LENGTH) return;
 
     const paren = currentParen();
     if (paren && !paren.isFunction) {
@@ -367,10 +435,10 @@ function formatSql(sql) {
       newLineAt(clauseMode === "on" ? baseCol() + 26 : baseCol() + 8);
     }
   };
-  const appendToken = (token, prev) => {
+  const appendToken = (token, prev, index = -1) => {
     const isCompoundOperatorContinuation = lowerValue(token) === "from" &&
       lowerValue(prev ?? { value: "" }) === "distinct";
-    if (!isCompoundOperatorContinuation) maybeWrapBefore(token, prev);
+    if (!isCompoundOperatorContinuation) maybeWrapBefore(token, prev, index);
     const value = displayToken(token);
     const prevValue = prev?.value ?? "";
     const prevLower = prev ? prev.value.toLowerCase() : "";
@@ -418,7 +486,7 @@ function formatSql(sql) {
       const prevLower = previousToken ? previousToken.value.toLowerCase() : "";
       const isFunction = previousToken?.type === "word" &&
         !["from", "join", "in", "values", "exists", "into"].includes(prevLower);
-      parens.push({ col: line.length - 1, isFunction, listBreakCol: null, multilineList: false });
+      parens.push({ col: displayWidth(line) - 1, isFunction, listBreakCol: null, multilineList: false });
       previousToken = token;
       continue;
     }
@@ -438,7 +506,7 @@ function formatSql(sql) {
       if (hasContent() && !line.endsWith("(")) newLineAt(baseCol());
       else if (!hasContent()) line = " ".repeat(baseCol());
       appendToken(token, previousToken);
-      selectAnchors.push({ anchor: line.length + 1, depth: parens.length });
+      selectAnchors.push({ anchor: displayWidth(line) + 1, depth: parens.length });
       clauseStack.push("select");
       previousToken = token;
       continue;
@@ -490,7 +558,8 @@ function formatSql(sql) {
     }
 
     if (["left", "right", "inner", "full", "cross"].includes(lower) && nextLower === "join") {
-      newLineAt(baseCol() + 9);
+      newLineAt(joinBreakCol());
+      if (lower !== "cross") pendingJoinIndents.push(lineIndent());
       appendToken(token, previousToken);
       i += 1;
       appendToken(tokens[i], token);
@@ -500,17 +569,20 @@ function formatSql(sql) {
     }
 
     if (lower === "join") {
-      newLineAt(baseCol() + 9);
+      newLineAt(joinBreakCol());
+      pendingJoinIndents.push(lineIndent());
       appendToken(token, previousToken);
       clauseStack.push("join");
       previousToken = token;
       continue;
     }
 
-    if (lower === "on" && clauseMode === "join") {
-      newLineAt(baseCol() + 19);
+    if (lower === "on" && (clauseMode === "join" || pendingJoinIndents.length) && !caseStack.length) {
+      const joinIndent = pendingJoinIndents.length ? pendingJoinIndents.pop() : null;
+      const onIndent = joinIndent !== null ? joinIndent + 4 : (hasContent() ? lineIndent() + 4 : baseCol() + 4);
+      newLineAt(onIndent);
       appendToken(token, previousToken);
-      conditionBreakCol = baseCol() + 22;
+      conditionBreakCol = onIndent + 4;
       clauseStack.push("on");
       previousToken = token;
       continue;
@@ -519,14 +591,14 @@ function formatSql(sql) {
     if (["and", "or"].includes(lower)) {
       const c = caseStack[caseStack.length - 1];
       if (["where", "having", "on"].includes(clauseMode)) {
-        conditionBreakCol = clauseMode === "on" ? baseCol() + 22 : baseCol() + 4;
+        conditionBreakCol = clauseMode === "on" ? (conditionBreakCol ?? lineIndent() + 4) : baseCol() + 4;
         newLineAt(conditionBreakCol);
         appendToken(token, previousToken);
         previousToken = token;
         continue;
       }
       if (c && c.multiline) {
-        if (line.length >= MAX_BOOLEAN_INLINE_LENGTH) newLineAt(c.anchor + 8);
+        if (displayWidth(line) >= MAX_CASE_BOOLEAN_INLINE_LENGTH) newLineAt(c.anchor + 8);
         appendToken(token, previousToken);
         previousToken = token;
         continue;
@@ -537,7 +609,7 @@ function formatSql(sql) {
         previousToken = token;
         continue;
       }
-      if (line.length >= MAX_BOOLEAN_INLINE_LENGTH) {
+      if (displayWidth(line) >= MAX_BOOLEAN_INLINE_LENGTH) {
         newLineAt(conditionBreakCol ?? fallbackBooleanCol());
         appendToken(token, previousToken);
         previousToken = token;
@@ -550,7 +622,7 @@ function formatSql(sql) {
       const inSelectList = top && top.depth === parens.length;
       appendToken(token, previousToken);
       caseStack.push({
-        anchor: inSelectList ? top.anchor : (line.length - 4),
+        anchor: inSelectList ? top.anchor : (displayWidth(line) - 4),
         multiline: !!inSelectList,
         depth: parens.length
       });
@@ -560,7 +632,7 @@ function formatSql(sql) {
 
     if (lower === "when") {
       const c = caseStack[caseStack.length - 1];
-      if (c && (c.multiline || line.length >= MAX_CASE_PREFIX_LENGTH)) expandCase(c, 4);
+      if (c && (c.multiline || displayWidth(line) >= MAX_CASE_PREFIX_LENGTH)) expandCase(c, 4);
       appendToken(token, previousToken);
       previousToken = token;
       continue;
@@ -568,9 +640,22 @@ function formatSql(sql) {
 
     if (lower === "then") {
       const c = caseStack[caseStack.length - 1];
-      if (c && c.multiline && line.length >= MAX_INLINE_CASE_LENGTH) {
+      let resultIndex = i + 1;
+      while (tokens[resultIndex] && tokens[resultIndex].type === "comment") resultIndex += 1;
+      const resultToken = tokens[resultIndex];
+      const afterResult = resultToken ? nextMeaningful(tokens, resultIndex) : null;
+      const resultLower = lowerValue(resultToken ?? { value: "" });
+      const simpleResultWord = resultToken?.type === "word" &&
+        (!KEYWORDS.has(resultLower) || ["false", "null", "true"].includes(resultLower));
+      const simpleThenResult = resultToken &&
+        (["number", "quoted", "string"].includes(resultToken.type) || simpleResultWord) &&
+        !["(", "."].includes(afterResult?.value ?? "");
+      const thenLength = displayWidth(line) + (hasContent() ? 1 : 0) + displayWidth(displayToken(token));
+      const shortThenResultFits = simpleThenResult &&
+        thenLength + 1 + displayWidth(displayToken(resultToken)) <= MAX_LINE_LENGTH;
+      if (c && displayWidth(line) >= MAX_INLINE_CASE_LENGTH && !shortThenResultFits) {
         expandCase(c, 8);
-      } else if (c && line.length > MAX_INLINE_CASE_LENGTH) {
+      } else if (c && !shortThenResultFits && displayWidth(line) >= MAX_CASE_COMPOUND_THEN_PREFIX) {
         expandCase(c, 8);
       }
       appendToken(token, previousToken);
@@ -601,7 +686,7 @@ function formatSql(sql) {
         newLineAt(top.anchor);
       } else if ((clauseMode === "group" || clauseMode === "order") && parens.length === 0) {
         newLineAt(baseCol() + 4);
-      } else if (paren && !paren.isFunction && (paren.multilineList || line.length >= MAX_INLINE_LIST_LENGTH)) {
+      } else if (paren && !paren.isFunction && (paren.multilineList || displayWidth(line) >= MAX_INLINE_LIST_LENGTH)) {
         wrapCurrentList(paren);
       }
       previousToken = token;
@@ -615,12 +700,13 @@ function formatSql(sql) {
       selectAnchors.length = 0;
       caseStack.length = 0;
       parens.length = 0;
+      pendingJoinIndents.length = 0;
       conditionBreakCol = null;
       previousToken = token;
       continue;
     }
 
-    appendToken(token, previousToken);
+    appendToken(token, previousToken, i);
     previousToken = token;
   }
 
@@ -648,42 +734,166 @@ function findAliasIndex(line) {
   return index;
 }
 
-function alignAliasRun(lines, start, end) {
+function readAliasEntry(line, index) {
+  const aliasIndex = findAliasIndex(line);
+  if (aliasIndex < 0) return null;
+  const before = line.slice(0, aliasIndex).replace(/\s+$/, "");
+  const after = line.slice(aliasIndex).trimStart().replace(/^as\s+/i, "as ");
+
+  return {
+    index,
+    aliasIndex,
+    aliasDisplayIndex: displayWidth(line.slice(0, aliasIndex)),
+    before,
+    beforeWidth: displayWidth(before),
+    after,
+    afterWidth: displayWidth(after)
+  };
+}
+
+function findAliasExpressionBreaks(value) {
+  const lower = value.toLowerCase();
   const candidates = [];
-  for (let i = start; i < end; i += 1) {
-    const index = findAliasIndex(lines[i]);
-    if (index >= 0 && index <= MAX_ALIAS_ALIGNMENT_COLUMN) {
-      candidates.push({ index: i, aliasIndex: index });
+  let quote = "";
+
+  for (let i = 0; i < value.length; i += 1) {
+    const char = value[i];
+    if (quote) {
+      if (char === quote && value[i - 1] !== "\\") {
+        if (value[i + 1] === quote) i += 1;
+        else quote = "";
+      }
+      continue;
+    }
+
+    if (["'", '"', "`"].includes(char)) {
+      quote = char;
+      continue;
+    }
+
+    if (lower.startsWith(" else ", i)) {
+      candidates.push({ prefixEnd: i, tailStart: i + 1, priority: 3 });
+      continue;
+    }
+    if (char === ",") {
+      candidates.push({ prefixEnd: i + 1, tailStart: i + 1, priority: 2 });
+      continue;
+    }
+    if (lower.startsWith(" and ", i) || lower.startsWith(" or ", i)) {
+      candidates.push({ prefixEnd: i, tailStart: i + 1, priority: 1 });
     }
   }
-  if (candidates.length < 2) return;
 
-  const maxAliasIndex = Math.max(...candidates.map((item) => item.aliasIndex));
-  if (maxAliasIndex > MAX_ALIAS_ALIGNMENT_COLUMN) return;
+  return candidates.sort((a, b) => b.priority - a.priority || b.prefixEnd - a.prefixEnd);
+}
 
-  for (const item of candidates) {
-    const line = lines[item.index];
-    const before = line.slice(0, item.aliasIndex).replace(/\s+$/, "");
-    const padding = maxAliasIndex - before.length + 1;
-    if (padding > MAX_ALIAS_ALIGNMENT_PADDING) continue;
+function wrapAliasExpression(item, targetAliasIndex) {
+  const leadingIndent = item.before.length - item.before.trimStart().length;
+  const continuationIndent = leadingIndent + 4;
 
-    const after = line.slice(item.aliasIndex).trimStart().replace(/^as\s+/i, "as ");
-    lines[item.index] = before + " ".repeat(padding) + after;
+  for (const candidate of findAliasExpressionBreaks(item.before)) {
+    const prefix = item.before.slice(0, candidate.prefixEnd).replace(/\s+$/, "");
+    const tail = item.before.slice(candidate.tailStart).trim();
+    const tailWidth = displayWidth(tail);
+    if (tailWidth < 8) continue;
+
+    const tailEnd = continuationIndent + tailWidth;
+    const padding = targetAliasIndex - tailEnd + 1;
+    if (displayWidth(prefix) > MAX_LINE_LENGTH || padding <= 0) continue;
+
+    const continuation = " ".repeat(continuationIndent) + tail + " ".repeat(padding) + item.after;
+    if (displayWidth(continuation) <= MAX_LINE_LENGTH) return [prefix, continuation];
   }
+
+  return null;
+}
+
+function alignAliasRun(lines) {
+  const entries = lines.map(readAliasEntry).filter(Boolean);
+  const hasOverlongAlias = entries.some((item) => item.beforeWidth + 1 + item.afterWidth > MAX_LINE_LENGTH);
+  if (entries.length < 2 && !hasOverlongAlias) return lines;
+
+  const inlineEntries = entries.filter((item) => item.aliasDisplayIndex <= MAX_ALIAS_ALIGNMENT_COLUMN);
+  const requestedAliasIndex = inlineEntries.length
+    ? Math.max(...inlineEntries.map((item) => item.aliasDisplayIndex))
+    : Math.min(Math.max(...entries.map((item) => item.aliasDisplayIndex)), MAX_ALIAS_ALIGNMENT_COLUMN);
+  const targetAliasIndex = Math.min(requestedAliasIndex, MAX_ALIAS_ALIGNMENT_COLUMN);
+  const entryByIndex = new Map(entries.map((item) => [item.index, item]));
+  const result = [];
+
+  for (let i = 0; i < lines.length; i += 1) {
+    const item = entryByIndex.get(i);
+    if (!item) {
+      result.push(lines[i]);
+      continue;
+    }
+
+    const entryTargetAliasIndex = Math.min(
+      targetAliasIndex,
+      Math.max(0, MAX_LINE_LENGTH - item.afterWidth - 1)
+    );
+    const padding = entryTargetAliasIndex - item.beforeWidth + 1;
+    const alignedLength = item.beforeWidth + padding + item.afterWidth;
+    const canAlignInline = padding > 0 &&
+      alignedLength <= MAX_LINE_LENGTH;
+
+    if (canAlignInline) {
+      result.push(item.before + " ".repeat(padding) + item.after);
+      continue;
+    }
+
+    const wrappedExpression = wrapAliasExpression(item, entryTargetAliasIndex);
+    if (wrappedExpression) {
+      result.push(...wrappedExpression);
+      continue;
+    }
+
+    const naturalLine = item.before + " " + item.after;
+    if (displayWidth(naturalLine) <= MAX_LINE_LENGTH) {
+      result.push(naturalLine);
+      continue;
+    }
+
+    const rightmostAliasIndent = Math.min(
+      item.beforeWidth + 1,
+      MAX_LINE_LENGTH - item.afterWidth
+    );
+    const aliasLine = " ".repeat(Math.max(entryTargetAliasIndex + 1, rightmostAliasIndent)) + item.after;
+    if (item.beforeWidth > 0 && item.beforeWidth <= MAX_LINE_LENGTH && displayWidth(aliasLine) <= MAX_LINE_LENGTH) {
+      result.push(item.before);
+      result.push(aliasLine);
+      continue;
+    }
+
+    result.push(lines[i]);
+  }
+
+  return result;
+}
+
+function startsNestedSelectEntry(line) {
+  return /^\s*(?:from|left join|right join|inner join|full join|cross join|join)\s+\(\s*select\b/i.test(line) &&
+    findAliasIndex(line) >= 0;
 }
 
 function alignAliasColumns(sql) {
   const lines = sql.split("\n");
-  let start = 0;
+  const result = [];
+  let run = [];
 
-  for (let i = 0; i <= lines.length; i += 1) {
-    if (i === lines.length || isAliasAlignmentBoundary(lines[i])) {
-      alignAliasRun(lines, start, i);
-      start = i + 1;
+  for (const line of lines) {
+    if (isAliasAlignmentBoundary(line)) {
+      result.push(...alignAliasRun(run));
+      run = [];
+      if (startsNestedSelectEntry(line)) run.push(line);
+      else result.push(line);
+    } else {
+      run.push(line);
     }
   }
+  result.push(...alignAliasRun(run));
 
-  return lines.join("\n");
+  return result.join("\n");
 }
 
 function cleanIdentifier(value) {
